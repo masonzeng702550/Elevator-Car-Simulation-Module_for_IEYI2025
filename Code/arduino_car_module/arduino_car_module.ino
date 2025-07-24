@@ -50,7 +50,8 @@ const unsigned long buttonDebounceTime = 200;
 
 // TFT螢幕控制變數
 unsigned long lastDisplayTime = 0;
-const unsigned long displayInterval = 1000; // 顯示切換間隔 (毫秒)
+//const unsigned long displayInterval = 1000; 
+const unsigned long displayInterval = 500; // 顯示切換間隔 (毫秒) - 優化為更快的更新頻率
 bool displayState = false; // false: 英文, true: 英文（保持一致性）
 
 // 電梯狀態變數（從Python接收）
