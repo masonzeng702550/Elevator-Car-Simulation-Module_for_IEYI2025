@@ -32,16 +32,25 @@ class ElevatorControlSim:
         self.master = master
         master.title("Elevator Operation Preview Application")
         self.cap = cv2.VideoCapture(0)
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)    
+        # 調整MOG2參數以提高小物體檢測的準確性
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=300,         # 減少歷史幀數 (從500減到300)
+            varThreshold=50,     # 提高變化檢測閾值 (從16提高到50，降低敏感度)
+            detectShadows=True
+        )
         self.penetration_area = 0 
         self.total_area = 0
         self.penetration_ratio = 0 
-        self.penetration_threshold = 0.50 
         self.prev_mask = None
         self.baseline_established = False
         self.stabilization_frames = 0
         self.display_width = 240
         self.display_height = 180
+        
+        # 簡化的學習率控制 - 專為演示設計
+        self.initial_learning_rate = 0.01  # 初始學習率：較快建立背景
+        self.stable_learning_rate = 0.0005  # 穩定後學習率：很低，防止靜態物體被學習為背景
+        self.current_learning_rate = self.initial_learning_rate
         
         # 辨識區域設定 (x, y, width, height)
         # 將左邊邊界往右調整 20% 的畫面寬度
@@ -126,7 +135,7 @@ class ElevatorControlSim:
         self.camera_label = tk.Label(self.camera_frame)
         self.camera_label.pack(pady=2)
 
-        self.penetration_info_label = tk.Label(self.camera_frame, text=f"突破量: {self.penetration_ratio:.2f}%")
+        self.penetration_info_label = tk.Label(self.camera_frame, text=f"物體檢測率: {self.penetration_ratio:.2f}%")
         self.penetration_info_label.pack(pady=2)
         
         self.controls_frame = tk.Frame(self.control_frame)
@@ -137,6 +146,32 @@ class ElevatorControlSim:
         )
         self.reset_bg_button.pack(fill=tk.X, padx=5, pady=2)
         
+        # 添加閾值調整控制
+        threshold_frame = tk.Frame(self.controls_frame)
+        threshold_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        tk.Label(threshold_frame, text="物體檢測敏感度:").pack()
+        
+        # 高強度閾值調整 (物體)
+        self.high_threshold_var = tk.IntVar(value=220)
+        tk.Label(threshold_frame, text="物體數值:").pack(anchor="w")
+        self.high_threshold_scale = tk.Scale(threshold_frame, from_=180, to=250, 
+                                           orient=tk.HORIZONTAL, variable=self.high_threshold_var)
+        self.high_threshold_scale.pack(fill=tk.X)
+        
+        # 中等強度閾值調整 (陰影)
+        self.medium_threshold_var = tk.IntVar(value=150)
+        tk.Label(threshold_frame, text="陰影數值:").pack(anchor="w")
+        self.medium_threshold_scale = tk.Scale(threshold_frame, from_=100, to=200,
+                                             orient=tk.HORIZONTAL, variable=self.medium_threshold_var)
+        self.medium_threshold_scale.pack(fill=tk.X)
+        
+        # 緊急模式觸發閾值調整
+        self.emergency_threshold_var = tk.DoubleVar(value=80.0)
+        tk.Label(threshold_frame, text="緊急模式觸發%:").pack(anchor="w")
+        self.emergency_threshold_scale = tk.Scale(threshold_frame, from_=20.0, to=95.0, resolution=5.0,
+                                                 orient=tk.HORIZONTAL, variable=self.emergency_threshold_var)
+        self.emergency_threshold_scale.pack(fill=tk.X)
 
 
         self.full_load_var = tk.BooleanVar(value=False)
@@ -267,11 +302,23 @@ class ElevatorControlSim:
             return "NORMAL"
     
     def reset_background(self):
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
+        # 使用調整後的MOG2參數重新建立背景減法器
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=300,         # 減少歷史幀數
+            varThreshold=50,     # 提高變化檢測閾值，降低敏感度
+            detectShadows=True
+        )
         self.baseline_established = False
         self.stabilization_frames = 0
-        print("Background Reset")
+        # 重置學習率狀態
+        self.current_learning_rate = self.initial_learning_rate
+        # 重置閾值為默認值
+        self.high_threshold_var.set(220)
+        self.medium_threshold_var.set(150)
+        self.emergency_threshold_var.set(80.0)
+        print("🔄 背景重置完成 - 使用智能強度檢測重新建立背景模型")
     
+
 
 
     def update_emergency_mode(self):
@@ -286,19 +333,20 @@ class ElevatorControlSim:
         self.update_emergency_mode()
         
         if self.manual_emergency:
-            print("🚨 手動：電梯已進入緊急模式 - 等待緊急內部請求")
+            print("🚨 手動：電梯已進入Emergency模式 - 等待緊急內部請求")
         else:
-            print("✅ 手動：電梯已解除緊急模式")
+            print("✅ 手動：電梯已解除Emergency模式")
             if prev_emergency:
-                print("電梯從緊急待命狀態恢復正常運作")
+                print("電梯從Emergency模式恢復正常運作")
+                # 清空暫存的外部請求，電梯停在當前樓層
                 if self.pending_external_requests:
                     pending_count = len(self.pending_external_requests)
-                    print(f"重新處理 {pending_count} 個暫存的外部請求")
-                    while self.pending_external_requests:
-                        req = self.pending_external_requests.popleft()
-                        self.add_request(req.floor, req.button_type)
-                if not self.is_moving_flag:
-                    self.master.after(100, self.process_requests)
+                    print(f"🗑️  清空 {pending_count} 個暫存的外部請求（Emergency模式解除後重新開始）")
+                    self.pending_external_requests.clear()
+                
+                # 設置電梯為待機狀態
+                self.direction = Direction.IDLE
+                print(f"✅ 電梯停留在 {self.current_floor} 樓，等待新的請求")
         
         self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
 
@@ -419,9 +467,9 @@ class ElevatorControlSim:
         end_y = self.floor_positions[end_floor] - self.elevator_height
         self.animation_frame = 0
         
-        # 設定移動時間為 7.5 秒，每 50ms 更新一次
-        frame_interval = 50  # 毫秒
-        movement_time = 7.5  # 秒
+        # 設定移動時間為 3 秒，每 30ms 更新一次 (更快更流暢)
+        frame_interval = 30  # 毫秒 (從50ms減少到30ms)
+        movement_time = 3.0  # 秒 (從7.5秒減少到3秒)
         self.total_frames = int((movement_time * 1000) / frame_interval)
         
         # 記錄開始時間用於除錯
@@ -435,7 +483,8 @@ class ElevatorControlSim:
 
         def step():
             if self.animation_frame < self.total_frames:
-                if not self.full_load and self.animation_frame % 20 == 0:
+                # 調整中途停靠檢查頻率 (從每20幀改為每15幀，配合更快的更新)
+                if not self.full_load and self.animation_frame % 15 == 0:
                     # ... (中途停靠邏輯不變) ...
                     active = self.get_active_requests()
                     coords = self.canvas.coords(self.elevator_rect)
@@ -514,8 +563,8 @@ class ElevatorControlSim:
                     self.current_floor = current_floor
                     self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
                 
-                # 每20幀（約1秒）發送一次狀態更新
-                if self.animation_frame % 20 == 0:
+                # 每33幀（約1秒）發送一次狀態更新 (配合30ms間隔: 30ms * 33 = 990ms ≈ 1秒)
+                if self.animation_frame % 33 == 0:
                     self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
                 
                 self.master.after(frame_interval, step)
@@ -547,18 +596,11 @@ class ElevatorControlSim:
                 self.direction = Direction.IDLE
                 self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
 
-                # 如果是自動緊急模式，在抵達目標樓層後重置狀態
+                # 如果是自動緊急模式，在抵達目標樓層後重置active狀態，但保持auto_emergency讓檢測邏輯處理
                 if self.auto_emergency_active:
-                    print("🎯 自動緊急模式：已抵達目標樓層，重置緊急模式狀態")
+                    print("🎯 Express模式：已抵達目標樓層")
                     self.auto_emergency_active = False
-                    # 檢查當前突破量，如果仍然超過閾值則保持緊急模式
-                    if self.penetration_ratio / 100 < self.penetration_threshold:
-                        print("✅ 突破量已降低，自動解除緊急模式")
-                        self.auto_emergency = False
-                        self.update_emergency_mode()
-                        self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
-                    else:
-                        print("⚠️ 突破量仍然過高，保持緊急模式")
+                    print("ℹ️  Express模式狀態將由突破量檢測自動管理")
                 
                 if self.full_load:
                     self.internal_requests.clear()
@@ -568,12 +610,11 @@ class ElevatorControlSim:
                 
                 self.info_label.config(text=f"已到 {self.current_floor} 樓。{self.get_status_text()}")
                 
+                # 移除自動處理暫存請求的邏輯，解除緊急模式後停在當前樓層
                 if not self.full_load and self.pending_external_requests:
                     pending_count = len(self.pending_external_requests)
-                    print(f"緊急模式已解除，重新處理 {pending_count} 個暫存的外部請求")
-                    while self.pending_external_requests:
-                        req = self.pending_external_requests.popleft()
-                        self.add_request(req.floor, req.button_type)
+                    print(f"🗑️  移動完成後清空 {pending_count} 個暫存的外部請求")
+                    self.pending_external_requests.clear()
                 
                 self.master.after(500, self.process_requests)
         step()
@@ -586,8 +627,11 @@ class ElevatorControlSim:
                 self.stabilization_frames += 1
                 if self.stabilization_frames > 10:
                     self.baseline_established = True
-                    print("背景基準已建立完成。")
-                self.background_subtractor.apply(frame)
+                    # 背景基準建立完成後，切換到低學習率
+                    self.current_learning_rate = self.stable_learning_rate
+                    print("🎯 背景基準已建立完成 - 切換到穩定學習率")
+                # 初始化階段建立背景模型
+                self.background_subtractor.apply(frame, learningRate=self.initial_learning_rate)
                 
                 display_frame = frame.copy()
                 cv2.putText(display_frame, f"建立背景基準中 ({self.stabilization_frames}/10)...", 
@@ -615,62 +659,133 @@ class ElevatorControlSim:
             roi_frame = frame[y:y+h, x:x+w]
             
             self.total_area = w * h  # 只計算辨識區域的面積
-            fg_mask = self.background_subtractor.apply(roi_frame)
-            fg_mask = cv2.GaussianBlur(fg_mask, (5, 5), 0)
-            _, fg_mask = cv2.threshold(fg_mask, 128, 255, cv2.THRESH_BINARY)
-            kernel = np.ones((5, 5), np.uint8)
-            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
-            self.penetration_area = cv2.countNonZero(fg_mask)
+            # 使用調整後的學習率防止靜態物體被誤學習為背景
+            fg_mask = self.background_subtractor.apply(roi_frame, learningRate=self.current_learning_rate)
+            
+            # 智能強度檢測 - 區分真正物體和陰影干擾
+            # 先進行輕微模糊去除噪音
+            fg_mask_blurred = cv2.GaussianBlur(fg_mask, (3, 3), 0)
+            
+            # 分析強度分佈，創建多層次檢測
+            # 高強度閾值：檢測真正的物體（深紅色區域）
+            high_intensity_threshold = self.high_threshold_var.get()  # 使用滑動條的值
+            medium_intensity_threshold = self.medium_threshold_var.get()  # 使用滑動條的值
+            
+            # 創建不同強度的遮罩
+            _, high_intensity_mask = cv2.threshold(fg_mask_blurred, high_intensity_threshold, 255, cv2.THRESH_BINARY)
+            _, medium_intensity_mask = cv2.threshold(fg_mask_blurred, medium_intensity_threshold, 255, cv2.THRESH_BINARY)
+            
+            # 形態學操作 - 針對高強度物體優化
+            kernel_small = np.ones((2, 2), np.uint8)
+            kernel_medium = np.ones((3, 3), np.uint8)
+            
+            # 高強度物體處理（主要計算目標）
+            high_intensity_mask = cv2.morphologyEx(high_intensity_mask, cv2.MORPH_OPEN, kernel_small)
+            high_intensity_mask = cv2.morphologyEx(high_intensity_mask, cv2.MORPH_CLOSE, kernel_medium)
+            
+            # 中等強度處理（僅用於視覺化）
+            medium_intensity_mask = cv2.morphologyEx(medium_intensity_mask, cv2.MORPH_OPEN, kernel_small)
+            
+            # 主要突破量計算：只使用高強度區域
+            self.penetration_area = cv2.countNonZero(high_intensity_mask)
             self.penetration_ratio = (self.penetration_area / self.total_area) * 100
-            self.penetration_info_label.config(text=f"BS Value: {self.penetration_ratio:.2f}%")
             
-            # 將處理後的遮罩放回原始影像位置
-            full_mask = np.zeros((height, width), dtype=np.uint8)
-            full_mask[y:y+h, x:x+w] = fg_mask
+            # 計算額外統計信息
+            medium_area = cv2.countNonZero(medium_intensity_mask)
+            shadow_area = medium_area - self.penetration_area  # 陰影區域
             
-            fg_mask_colored = cv2.cvtColor(full_mask, cv2.COLOR_GRAY2BGR)
-            fg_mask_colored[np.where((fg_mask_colored == [255, 255, 255]).all(axis=2))] = [0, 0, 255]
-            alpha = 0.5
-            visualization = cv2.addWeighted(frame, 1, fg_mask_colored, alpha, 0)
+            # 使用高強度遮罩作為主要檢測結果
+            fg_mask = high_intensity_mask
+            self.penetration_info_label.config(text=f"物體檢測率: {self.penetration_ratio:.2f}%")
+            
+            # 創建多層次視覺化 - 區分物體和陰影
+            full_high_mask = np.zeros((height, width), dtype=np.uint8)
+            full_medium_mask = np.zeros((height, width), dtype=np.uint8)
+            
+            # 將不同強度遮罩放回原始影像位置
+            full_high_mask[y:y+h, x:x+w] = high_intensity_mask
+            full_medium_mask[y:y+h, x:x+w] = medium_intensity_mask
+            
+            # 創建彩色遮罩
+            visualization = frame.copy()
+            
+            # 高強度物體：深紅色（主要檢測目標）
+            high_mask_colored = cv2.cvtColor(full_high_mask, cv2.COLOR_GRAY2BGR)
+            high_mask_colored[np.where((high_mask_colored == [255, 255, 255]).all(axis=2))] = [0, 0, 255]  # 深紅色
+            
+            # 中等強度陰影：淺黃色（參考用）
+            medium_mask_colored = cv2.cvtColor(full_medium_mask, cv2.COLOR_GRAY2BGR)
+            medium_mask_colored[np.where((medium_mask_colored == [255, 255, 255]).all(axis=2))] = [0, 255, 255]  # 淺黃色
+            
+            # 先疊加陰影（較淺），再疊加物體（較深）
+            alpha_shadow = 0.3
+            alpha_object = 0.6
+            
+            # 疊加陰影區域
+            shadow_only_mask = full_medium_mask - full_high_mask  # 只有陰影的區域
+            shadow_only_colored = cv2.cvtColor(shadow_only_mask, cv2.COLOR_GRAY2BGR)
+            shadow_only_colored[np.where((shadow_only_colored == [255, 255, 255]).all(axis=2))] = [0, 255, 255]  # 淺黃色
+            visualization = cv2.addWeighted(visualization, 1, shadow_only_colored, alpha_shadow, 0)
+            
+            # 疊加高強度物體區域
+            visualization = cv2.addWeighted(visualization, 1, high_mask_colored, alpha_object, 0)
             
             # 在畫面上繪製辨識區域邊界
             cv2.rectangle(visualization, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(visualization, "Detection Area", (x + 5, y - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.putText(visualization, f"BS Value: {self.penetration_ratio:.2f}%", (10, 30),
+            cv2.putText(visualization, f"Object Ratio: {self.penetration_ratio:.2f}%", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            if self.penetration_ratio / 100 >= self.penetration_threshold:
-                cv2.putText(visualization, "⚠️ 物體過多", (10, 60),
+            # 獲取當前緊急模式觸發閾值
+            emergency_threshold = self.emergency_threshold_var.get() / 100.0  # 轉換為比例
+            
+            # 詳細的多層次檢測信息
+            object_text = f"Objects: {self.penetration_area} px (Red)"
+            shadow_text = f"Shadows: {shadow_area} px (Yellow)"
+            threshold_text = f"Thresholds: Obj={high_intensity_threshold}, Shadow={medium_intensity_threshold}"
+            emergency_text = f"Emergency Trigger: {emergency_threshold * 100:.0f}%"
+            
+            cv2.putText(visualization, object_text, (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)  # 紅色文字
+            cv2.putText(visualization, shadow_text, (10, 80),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)  # 黃色文字
+            cv2.putText(visualization, threshold_text, (10, 100),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)  # 白色文字
+            cv2.putText(visualization, emergency_text, (10, 120),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)  # 綠色文字
+            
+            if self.penetration_ratio / 100 >= emergency_threshold:
+                cv2.putText(visualization, "⚠️ 物體過多", (10, 150),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if not self.auto_emergency:
-                    print(f"偵測到突破量 {self.penetration_ratio:.2f}% 已超過閾值 {self.penetration_threshold * 100:.0f}%")
-                    print("🚨 自動啟動緊急模式 (滿載)")
+                    print(f"偵測到突破量 {self.penetration_ratio:.2f}% 已超過閾值 {emergency_threshold * 100:.0f}%")
+                    print("🚨 自動啟動Express模式 (物體過多)")
                     self.auto_emergency = True
                     self.auto_emergency_active = True  # 標記自動緊急模式已啟動
                     self.send_to_arduino("FULL", self.current_floor, self.direction)
             else:
-                # 只有在電梯靜止且自動緊急模式已啟動時才解除
-                if self.auto_emergency and not self.is_moving_flag and self.auto_emergency_active:
+                # 修正：簡化自動緊急模式解除邏輯，直接檢查auto_emergency狀態
+                if self.auto_emergency:
                     prev_emergency = self.full_load
-                    print(f"偵測到突破量 {self.penetration_ratio:.2f}% 已低於閾值 {self.penetration_threshold * 100:.0f}%")
-                    print("✅ 自動解除緊急模式")
+                    print(f"🔄 偵測到突破量 {self.penetration_ratio:.2f}% 已低於閾值 {emergency_threshold * 100:.0f}%")
+                    print("✅ 自動解除Express模式")
                     self.auto_emergency = False
-                    self.auto_emergency_active = False  # 標記自動緊急模式已解除
+                    self.auto_emergency_active = False  # 重置狀態標記
                     self.update_emergency_mode()
                     self.send_to_arduino(self.get_current_module_status(), self.current_floor, self.direction)
 
                     if prev_emergency and not self.full_load:
-                        print("電梯從緊急待命狀態恢復正常運作")
+                        print("🎯 電梯從Express模式恢復正常運作")
+                        # 清空暫存的外部請求，電梯停在當前樓層
                         if self.pending_external_requests:
                             pending_count = len(self.pending_external_requests)
-                            print(f"重新處理 {pending_count} 個暫存的外部請求")
-                            while self.pending_external_requests:
-                                req = self.pending_external_requests.popleft()
-                                self.add_request(req.floor, req.button_type)
-                        if not self.is_moving_flag:
-                            self.master.after(100, self.process_requests)
+                            print(f"🗑️  清空 {pending_count} 個暫存的外部請求（Express模式解除後重新開始）")
+                            self.pending_external_requests.clear()
+                        
+                        # 設置電梯為待機狀態
+                        self.direction = Direction.IDLE
+                        print(f"✅ 電梯停留在 {self.current_floor} 樓，等待新的請求")
             
             self.update_emergency_mode()
             
@@ -723,11 +838,11 @@ class ElevatorControlSim:
             print("Arduino 三樓按鈕被按下")
             self.add_request(3, ButtonType.INTERNAL)
         elif button_signal == "BUTTON:EMERGENCY_ON":
-            print("Arduino 緊急按鈕被按下 - 進入緊急模式")
+            print("Arduino 緊急按鈕被按下 - 進入Emergency模式")
             self.full_load_var.set(True)
             self.toggle_full_load()
         elif button_signal == "BUTTON:EMERGENCY_OFF":
-            print("Arduino 緊急按鈕被按下 - 解除緊急模式")
+            print("Arduino 緊急按鈕被按下 - 解除Emergency模式")
             self.full_load_var.set(False)
             self.toggle_full_load()
         elif button_signal.startswith("PLAY_SOUND:"):
